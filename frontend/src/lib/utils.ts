@@ -46,3 +46,31 @@ export function getConfidenceColor(confidence: number): string {
   if (confidence >= 0.7) return 'text-yellow-400';
   return 'text-green-400';
 }
+
+/**
+ * Human-readable byte size using base-1024 units.
+ * `null`/`undefined` means "not measured" and renders as an em dash — it must
+ * never be shown as 0, which would claim the camera has no media.
+ */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return '—';
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes === 0) return '0 B';
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exponent;
+  const decimals = exponent === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(decimals)} ${units[exponent]}`;
+}
+
+/** `1280x720` → `720p HD (1280×720)`; unknown stays unknown. */
+export function formatResolution(resolution: string | null | undefined): string | null {
+  if (!resolution) return null;
+  const match = /^(\d{2,5})\s*[x×]\s*(\d{2,5})$/i.exec(resolution.trim());
+  if (!match) return resolution.trim();
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  const label = height >= 2160 ? '4K UHD' : height >= 1440 ? 'QHD' : height >= 1080 ? 'Full HD' : height >= 720 ? 'HD' : 'SD';
+  return `${height}p ${label} (${width}×${height})`;
+}

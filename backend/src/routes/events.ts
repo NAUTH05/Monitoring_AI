@@ -3,8 +3,16 @@ import { Request, Response, Router } from 'express';
 import { Server } from 'socket.io';
 import { z } from 'zod';
 import prisma from '../lib/prisma';
+import {
+  APP_TIME_ZONE,
+  DateRangeError,
+  singleDayRange,
+  todayKey,
+} from '../lib/datetime';
+import { buildEventWhere, parsePositiveInt } from '../services/reporting/event-filter';
 import { authenticate, apiKeyAuth } from '../middleware/auth';
 import { telegramDispatcher } from '../services/telegram';
+import { invalidateCameraStorage } from '../services/storage/camera-storage';
 
 const router = Router();
 
@@ -35,22 +43,72 @@ const eventInclude = {
   evidence: { orderBy: { sequence: 'asc' as const } },
 };
 
+// GET /api/events/stats
+// Database-backed aggregates for the CURRENT filter, plus "today" and "all time"
+// scopes so the UI never claims a total that was computed from one page.
+// Registered before `/:id` so "stats" is not treated as an id.
+router.get('/stats', authenticate, async (req: Request, res: Response) => {
+  try {
+    const where = buildEventWhere(req.query);
+
+    // Same non-date filters, but without the date window, for the "today" scope.
+    const baseWithoutDates: Prisma.EventWhereInput = { ...where };
+    delete baseWithoutDates.timestamp;
+
+    const today = todayKey();
+    const todayRange = singleDayRange(today);
+
+    const [filteredTotal, filteredAlerts, confidence, todayTotal, todayAlerts, allTotal, allAlerts] =
+      await Promise.all([
+        prisma.event.count({ where }),
+        prisma.event.count({ where: { ...where, isAlert: true } }),
+        prisma.event.aggregate({ where, _avg: { confidence: true } }),
+        prisma.event.count({
+          where: { ...baseWithoutDates, timestamp: { gte: todayRange.start, lt: todayRange.endExclusive } },
+        }),
+        prisma.event.count({
+          where: {
+            ...baseWithoutDates,
+            isAlert: true,
+            timestamp: { gte: todayRange.start, lt: todayRange.endExclusive },
+          },
+        }),
+        prisma.event.count(),
+        prisma.event.count({ where: { isAlert: true } }),
+      ]);
+
+    res.json({
+      success: true,
+      data: {
+        timeZone: APP_TIME_ZONE,
+        today,
+        filtered: {
+          totalEvents: filteredTotal,
+          totalAlerts: filteredAlerts,
+          avgConfidence: confidence._avg.confidence ?? 0,
+          alertRate: filteredTotal > 0 ? (filteredAlerts / filteredTotal) * 100 : 0,
+        },
+        todayScope: { totalEvents: todayTotal, totalAlerts: todayAlerts },
+        allTime: { totalEvents: allTotal, totalAlerts: allAlerts },
+      },
+    });
+  } catch (err) {
+    if (err instanceof DateRangeError) {
+      res.status(400).json({ success: false, message: err.message });
+      return;
+    }
+    res.status(500).json({ success: false, message: 'Failed to fetch event statistics' });
+  }
+});
+
 // GET /api/events
 router.get('/', authenticate, async (req: Request, res: Response) => {
   try {
-    const { page = '1', limit = '20', type, cameraId, startDate, endDate, isAlert } = req.query;
-    const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
+    const page = parsePositiveInt(req.query.page, 1, 100_000);
+    const limit = parsePositiveInt(req.query.limit, 20, 200);
+    const skip = (page - 1) * limit;
 
-    const where: Record<string, unknown> = {};
-    if (type) where.eventType = type;
-    if (cameraId) where.cameraId = cameraId;
-    if (isAlert !== undefined) where.isAlert = isAlert === 'true';
-    if (startDate || endDate) {
-      const dateFilter: Record<string, Date> = {};
-      if (startDate) dateFilter.gte = new Date(startDate as string);
-      if (endDate) dateFilter.lte = new Date(endDate as string);
-      where.timestamp = dateFilter;
-    }
+    const where = buildEventWhere(req.query);
 
     const [events, total] = await Promise.all([
       prisma.event.findMany({
@@ -58,7 +116,7 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
         include: eventInclude,
         orderBy: { timestamp: 'desc' },
         skip,
-        take: parseInt(limit as string),
+        take: limit,
       }),
       prisma.event.count({ where }),
     ]);
@@ -66,9 +124,13 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
     res.json({
       success: true,
       data: events,
-      meta: { total, page: parseInt(page as string), limit: parseInt(limit as string) },
+      meta: { total, page, limit },
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof DateRangeError) {
+      res.status(400).json({ success: false, message: err.message });
+      return;
+    }
     res.status(500).json({ success: false, message: 'Failed to fetch events' });
   }
 });
@@ -135,6 +197,8 @@ router.post('/', apiKeyAuth, async (req: Request, res: Response) => {
           capturedAt: event.timestamp,
         },
       });
+      // New media on disk: the camera's storage figure is stale now.
+      invalidateCameraStorage(event.cameraId);
     }
 
     const io = req.app.get('io') as Server;
@@ -218,6 +282,8 @@ router.post('/:id/evidence', apiKeyAuth, async (req: Request, res: Response) => 
     if (Object.keys(patch).length > 0) {
       await prisma.event.update({ where: { id: event.id }, data: patch });
     }
+
+    invalidateCameraStorage(event.cameraId);
 
     const io = req.app.get('io') as Server;
     io.emit('new-evidence', { eventId: event.id, evidence });

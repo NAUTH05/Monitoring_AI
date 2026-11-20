@@ -43,7 +43,9 @@ router.get('/runtime-config', apiKeyAuth, async (_req: Request, res: Response) =
     const go2rtcRtspBase = process.env.GO2RTC_RTSP_URL || 'rtsp://127.0.0.1:8554';
 
     const cameras = await prisma.camera.findMany({
-      where: { isActive: true },
+      // Deleted cameras are gone; deactivated ones are excluded so the runtime
+      // stops their worker (StreamManager reconciles `enabled` per camera).
+      where: { isActive: true, deletedAt: null },
       include: { cameraModules: { include: { module: true } } },
       orderBy: { createdAt: 'asc' },
     });

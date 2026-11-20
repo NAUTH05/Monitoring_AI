@@ -41,6 +41,16 @@ export interface CameraModule {
   createdAt: string;
 }
 
+export type StorageMeasurementStatus = 'ok' | 'unavailable' | 'calculating';
+
+/** Measured media footprint of one camera. `bytes: null` means "not measured". */
+export interface CameraStorageInfo {
+  bytes: number | null;
+  measurementStatus: StorageMeasurementStatus;
+  calculatedAt: string | null;
+  reason?: string | null;
+}
+
 export interface Camera {
   id: string;
   name: string;
@@ -52,10 +62,17 @@ export interface Camera {
   /** URL the AI runtime consumes (derived from the stream). */
   aiSourceUrl?: string;
   status: CameraStatus;
+  /** Administrative activation (user on/off switch), independent of `status`. */
   isActive: boolean;
+  /** Soft-delete marker. Deleted cameras are not listed. */
+  deletedAt?: string | null;
   lastHeartbeat?: string;
-  resolution?: string;
-  storageGb?: number;
+  /** Configured resolution ("1280x720") or null when unknown. Never inferred. */
+  resolution?: string | null;
+  /** Measured storage. `bytes === null` ⇒ unavailable, not zero. */
+  storage?: CameraStorageInfo;
+  /** Backward-compatible scalar derived from measured bytes only. */
+  storageGb?: number | null;
   createdAt: string;
   updatedAt: string;
   cameraModules?: CameraModule[];
@@ -377,4 +394,61 @@ export interface TelegramChatDiscovery {
 export interface TelegramStatus {
   configured: boolean;
   keySource: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reports
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface DailyBucket {
+  /** `YYYY-MM-DD` in the reporting timezone. */
+  date: string;
+  count: number;
+  alerts: number;
+}
+
+export interface TypeBucket {
+  type: string;
+  count: number;
+}
+
+interface ReportTotals {
+  totalEvents: number;
+  totalAlerts: number;
+  /** Percentage (0-100). */
+  alertRate: number;
+  timeZone: string;
+}
+
+export interface DailyReport extends ReportTotals {
+  date: string;
+  /** Legacy flat map kept for compatibility. */
+  byType: Record<string, number>;
+  byTypeList?: TypeBucket[];
+  dailyData?: DailyBucket[];
+  events?: Event[];
+}
+
+export interface WeeklyReport extends ReportTotals {
+  startDate: string;
+  endDate: string;
+  dailyData: DailyBucket[];
+  byType: TypeBucket[];
+}
+
+export interface MonthlyReport extends ReportTotals {
+  year: number;
+  month: number;
+  startDate: string;
+  endDate: string;
+  dailyData: DailyBucket[];
+  byType: TypeBucket[];
+}
+
+export interface EventStats {
+  timeZone: string;
+  today: string;
+  filtered: { totalEvents: number; totalAlerts: number; avgConfidence: number; alertRate: number };
+  todayScope: { totalEvents: number; totalAlerts: number };
+  allTime: { totalEvents: number; totalAlerts: number };
 }

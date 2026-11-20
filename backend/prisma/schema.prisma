@@ -49,8 +49,17 @@ model Camera {
   /// URL the AI runtime consumes (usually rtsp://<host>:8554/<streamName>).
   /// Kept in the DB so AI-Cam discovers it instead of reading per-camera env.
   aiSourceUrl   String?        @map("ai_source_url")
+  /// Measured/configured capture resolution (e.g. "1280x720"). NULL = unknown:
+  /// never inferred from list position. Populated by the camera wizard.
+  resolution    String?
   status        CameraStatus   @default(OFFLINE)
+  /// Administrative activation (the user's on/off switch). Independent from
+  /// `status` (runtime connectivity) and from `deletedAt` (removal).
   isActive      Boolean        @default(true) @map("is_active")
+  /// Soft-delete marker. NULL = part of the normal inventory. Before this
+  /// column existed, `isActive = false` meant "deleted"; the migration backfills
+  /// `deletedAt` for those rows so they do not reappear as deactivated cameras.
+  deletedAt     DateTime?      @map("deleted_at")
   lastHeartbeat DateTime?      @map("last_heartbeat")
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
@@ -59,6 +68,7 @@ model Camera {
 
   @@index([status])
   @@index([location])
+  @@index([deletedAt])
   @@map("cameras")
 }
 

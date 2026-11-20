@@ -136,6 +136,34 @@ export const openapiSpec = {
         responses: { 200: { description: 'OK' } },
       },
     },
+    '/api/cameras/{id}/activation': {
+      patch: {
+        tags: ['Cameras'],
+        summary: 'Bật/tắt camera (Admin/Manager). Tách biệt với xoá và trạng thái kết nối',
+        description:
+          'Camera bị tắt vẫn hiện trong danh sách, giữ nguyên module/ROI/lịch sử và có thể bật lại. '
+          + 'AI runtime sẽ dừng worker của riêng camera này ở lần poll kế tiếp. Idempotent.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['isActive'],
+                properties: { isActive: { type: 'boolean', example: false } },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: 'OK (meta.changed = có thay đổi hay không)' },
+          400: { description: 'Body không hợp lệ' },
+          403: { description: 'Không đủ quyền' },
+          404: { description: 'Không tìm thấy hoặc camera đã bị xoá' },
+        },
+      },
+    },
     '/api/cameras/{id}/status': {
       patch: {
         tags: ['Cameras'],
@@ -203,6 +231,20 @@ export const openapiSpec = {
         responses: { 200: { description: 'OK' }, 404: { description: 'Không tìm thấy' } },
       },
     },
+    '/api/events/stats': {
+      get: {
+        tags: ['Events'],
+        summary: 'Thống kê sự kiện theo bộ lọc (tổng hợp từ DB, không phải trang hiện tại)',
+        parameters: [
+          { name: 'startDate', in: 'query', schema: { type: 'string', example: '2026-10-01' }, description: 'YYYY-MM-DD (múi giờ APP_TIME_ZONE)' },
+          { name: 'endDate', in: 'query', schema: { type: 'string', example: '2026-10-31' }, description: 'YYYY-MM-DD, bao gồm cả ngày này' },
+          { name: 'type', in: 'query', schema: { type: 'string' } },
+          { name: 'cameraId', in: 'query', schema: { type: 'string' } },
+          { name: 'isAlert', in: 'query', schema: { type: 'boolean' } },
+        ],
+        responses: { 200: { description: 'OK' }, 400: { description: 'Ngày không hợp lệ' } },
+      },
+    },
     '/api/events/alerts/{alertId}/acknowledge': {
       patch: {
         tags: ['Events'],
@@ -255,6 +297,47 @@ export const openapiSpec = {
     },
     '/api/reports/dashboard': {
       get: { tags: ['Reports'], summary: 'Thống kê tổng hợp (dashboard)', responses: { 200: { description: 'OK' } } },
+    },
+    '/api/reports/daily': {
+      get: {
+        tags: ['Reports'],
+        summary: 'Báo cáo theo ngày (mặc định: hôm nay theo APP_TIME_ZONE)',
+        parameters: [
+          { name: 'date', in: 'query', schema: { type: 'string', example: '2026-10-05' }, description: 'YYYY-MM-DD' },
+        ],
+        responses: {
+          200: { description: 'totalEvents, totalAlerts, alertRate, byType, dailyData, events' },
+          400: { description: 'Ngày không hợp lệ' },
+        },
+      },
+    },
+    '/api/reports/weekly': {
+      get: {
+        tags: ['Reports'],
+        summary: 'Báo cáo theo tuần (thứ Hai → Chủ nhật chứa ngày tham chiếu)',
+        parameters: [
+          { name: 'date', in: 'query', schema: { type: 'string', example: '2026-10-07' }, description: 'Ngày tham chiếu (YYYY-MM-DD)' },
+          { name: 'startDate', in: 'query', schema: { type: 'string' }, description: 'Tương thích cũ — tự snap về tuần chứa ngày này' },
+        ],
+        responses: {
+          200: { description: 'startDate, endDate, totalEvents, totalAlerts, alertRate, dailyData (7 bucket), byType' },
+          400: { description: 'Ngày không hợp lệ' },
+        },
+      },
+    },
+    '/api/reports/monthly': {
+      get: {
+        tags: ['Reports'],
+        summary: 'Báo cáo theo tháng (mặc định: tháng hiện tại)',
+        parameters: [
+          { name: 'year', in: 'query', schema: { type: 'integer', example: 2026 } },
+          { name: 'month', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 12, example: 10 } },
+        ],
+        responses: {
+          200: { description: 'year, month, totalEvents, totalAlerts, alertRate, dailyData (zero-filled), byType' },
+          400: { description: 'Tháng/năm không hợp lệ' },
+        },
+      },
     },
     '/api/health': {
       get: { tags: ['Health'], summary: 'Tình trạng hệ thống', responses: { 200: { description: 'OK' } } },

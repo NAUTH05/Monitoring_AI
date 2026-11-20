@@ -2,13 +2,28 @@ import { spawn } from 'child_process';
 import { Request, Response, Router } from 'express';
 import fs from 'fs';
 import path from 'path';
+import prisma from '../lib/prisma';
 import { authenticate, authorize } from '../middleware/auth';
+import { invalidateCameraStorage } from '../services/storage/camera-storage';
 
 const router = Router();
 
 const GO2RTC_API_URL = (process.env.GO2RTC_API_URL || 'http://localhost:1984').replace(/\/$/, '');
 const FFMPEG_BIN = process.env.FFMPEG_BIN || 'ffmpeg';
 const evidenceDir = path.join(__dirname, '../../evidence');
+
+/** A new file in evidence/ makes that camera's measured storage stale. */
+async function invalidateForStream(streamName: string): Promise<void> {
+  try {
+    const camera = await prisma.camera.findFirst({
+      where: { streamName, deletedAt: null },
+      select: { id: true },
+    });
+    if (camera) invalidateCameraStorage(camera.id);
+  } catch {
+    // Cache invalidation is best-effort; the TTL expires it anyway.
+  }
+}
 
 // Filesystem-safe filename fragment.
 function safe(name: string): string {
@@ -33,6 +48,7 @@ router.post('/:streamName/snapshot', authenticate, authorize('Admin', 'Manager',
     }
     const filename = `snap_${safe(streamName)}_${stamp()}.jpg`;
     fs.writeFileSync(path.join(evidenceDir, filename), buf);
+    await invalidateForStream(streamName);
     res.json({ success: true, data: { url: `/evidence/${filename}` } });
   } catch {
     res.status(502).json({ success: false, message: 'Unable to reach go2rtc' });
@@ -61,6 +77,7 @@ router.post('/:streamName/record', authenticate, authorize('Admin', 'Manager'), 
     if (settled) return;
     settled = true;
     if (ok) {
+      void invalidateForStream(streamName);
       res.json({ success: true, data: { url: `/evidence/${filename}` } });
     } else {
       res.status(500).json({ success: false, message: message || 'Recording failed' });

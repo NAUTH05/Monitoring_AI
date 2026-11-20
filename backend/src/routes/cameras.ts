@@ -15,8 +15,51 @@ import {
   putStream,
   streamExists,
 } from '../services/go2rtc';
+import {
+  type CameraStorageInfo,
+  invalidateCameraStorage,
+  measureCamerasStorage,
+  peekCachedStorage,
+} from '../services/storage/camera-storage';
 
 const router = Router();
+
+/** Cameras are measured with bounded concurrency; a slow disk must not hang the list. */
+const STORAGE_DEADLINE_MS = 1_500;
+
+function calculatingStorage(): CameraStorageInfo {
+  return { bytes: null, measurementStatus: 'calculating', calculatedAt: null, reason: null };
+}
+
+/**
+ * Measure storage for the cameras on this page, but never wait longer than
+ * `STORAGE_DEADLINE_MS`. Measurements continue in the background and populate
+ * the cache, so the next poll shows the value instead of blocking this request.
+ */
+async function storageForPage(
+  cameras: { id: string; streamName: string | null }[],
+): Promise<Map<string, CameraStorageInfo>> {
+  const measurement = measureCamerasStorage(cameras);
+
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), STORAGE_DEADLINE_MS);
+  });
+
+  try {
+    const outcome = await Promise.race([measurement.then(() => 'done' as const), deadline]);
+    if (outcome === 'done') return measurement;
+
+    // Deadline hit: report what is already known, mark the rest as calculating.
+    const partial = new Map<string, CameraStorageInfo>();
+    for (const camera of cameras) {
+      partial.set(camera.id, peekCachedStorage(camera.id) ?? calculatingStorage());
+    }
+    return partial;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 const cameraSchema = z.object({
   name: z.string().min(1).max(100),
@@ -50,13 +93,20 @@ const provisionSchema = z.object({
 const updateSourceSchema = z.object(sourceFields).partial();
 
 // GET /api/cameras
+// Storage is MEASURED from disk (see services/storage/camera-storage.ts).
+// Resolution comes from persisted camera metadata and is null when unknown —
+// neither value is ever derived from the camera's position in the result set.
 router.get('/', authenticate, async (req: Request, res: Response) => {
   try {
-    const { page = '1', limit = '20', search, status } = req.query;
+    const { page = '1', limit = '20', search, status, activation, refreshStorage } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
 
-    const where: Record<string, unknown> = { isActive: true };
+    // Deleted cameras are excluded; deactivated ones stay listed (they are still
+    // manageable). `isActive` is now purely administrative activation.
+    const where: Record<string, unknown> = { deletedAt: null };
     if (status) where.status = status;
+    if (activation === 'active') where.isActive = true;
+    else if (activation === 'inactive') where.isActive = false;
     if (search) {
       where.OR = [
         { name: { contains: search as string, mode: 'insensitive' } },
@@ -81,16 +131,24 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
       prisma.camera.count({ where }),
     ]);
 
-    const enrichedCameras = cameras.map((cam, index) => {
-      const eventCount = cam._count?.events || 0;
-      const resolutions = ['1080p Full HD (1920x1080)', '4K UHD (3840x2160)', '1080p Full HD (1920x1080)', '720p HD (1280x720)'];
-      const resolution = resolutions[index % resolutions.length];
-      const storageGb = parseFloat(((eventCount * 0.45) + 14.2 + (index * 3.5)).toFixed(1));
+    if (refreshStorage === '1' || refreshStorage === 'true') {
+      invalidateCameraStorage();
+    }
 
+    const storage = await storageForPage(cameras);
+
+    const enrichedCameras = cameras.map((cam) => {
+      const info = storage.get(cam.id) ?? calculatingStorage();
       return {
         ...cam,
-        resolution,
-        storageGb,
+        // Persisted metadata only. `null` = unknown, rendered as "Unknown".
+        resolution: cam.resolution ?? null,
+        storage: info,
+        // Backward-compatible scalar, derived ONLY from measured bytes.
+        storageGb:
+          info.measurementStatus === 'ok' && info.bytes !== null
+            ? Number((info.bytes / 1024 ** 3).toFixed(3))
+            : null,
       };
     });
 
@@ -117,6 +175,12 @@ router.get('/:id/ai-config', apiKeyAuth, async (req: Request, res: Response) => 
     });
 
     if (!camera) {
+      res.status(404).json({ success: false, message: 'Camera not found' });
+      return;
+    }
+
+    // A deleted camera must not be revived by a stale runtime poll.
+    if (camera.deletedAt) {
       res.status(404).json({ success: false, message: 'Camera not found' });
       return;
     }
@@ -153,12 +217,20 @@ router.get('/:id', authenticate, async (req: Request, res: Response) => {
       },
     });
 
-    if (!camera) {
+    if (!camera || camera.deletedAt) {
       res.status(404).json({ success: false, message: 'Camera not found' });
       return;
     }
 
-    res.json({ success: true, data: camera });
+    const storage = await storageForPage([camera]);
+    res.json({
+      success: true,
+      data: {
+        ...camera,
+        resolution: camera.resolution ?? null,
+        storage: storage.get(camera.id) ?? calculatingStorage(),
+      },
+    });
   } catch {
     res.status(500).json({ success: false, message: 'Failed to fetch camera' });
   }
@@ -218,6 +290,9 @@ router.post('/provision', authenticate, authorize('Admin', 'Manager'), async (re
         subRtspUrl: body.subRtspUrl,
         streamName,
         aiSourceUrl: streamAiSourceUrl(streamName),
+        // Only what the wizard actually configured (webcam device). RTSP
+        // cameras stay null = unknown instead of guessing a resolution.
+        resolution: body.resolution?.trim() || null,
         status: 'ONLINE',
       },
     });
@@ -276,7 +351,7 @@ router.post('/', authenticate, authorize('Admin', 'Manager'), async (req: Reques
 router.put('/:id', authenticate, authorize('Admin', 'Manager'), async (req: Request, res: Response) => {
   try {
     const existing = await prisma.camera.findUnique({ where: { id: req.params.id } });
-    if (!existing) {
+    if (!existing || existing.deletedAt) {
       res.status(404).json({ success: false, message: 'Camera not found' });
       return;
     }
@@ -284,6 +359,12 @@ router.put('/:id', authenticate, authorize('Admin', 'Manager'), async (req: Requ
     const body = cameraSchema.partial().parse(req.body);
     const source = updateSourceSchema.parse(req.body);
     const data: Prisma.CameraUpdateInput = { ...body };
+
+    // Configured resolution is metadata, not a measurement: store it when the
+    // wizard supplied one, otherwise leave the existing value untouched.
+    if (source.resolution !== undefined) {
+      data.resolution = source.resolution?.trim() || null;
+    }
 
     if (source.sourceType) {
       const spec = { ...source, sourceType: source.sourceType };
@@ -336,21 +417,29 @@ router.put('/:id', authenticate, authorize('Admin', 'Manager'), async (req: Requ
 
 // DELETE /api/cameras/:id
 // Soft-deletes the camera and removes its MANAGED go2rtc stream when no other
-// active camera still uses it (never touches a shared/external stream).
+// camera in the inventory still uses it (never touches a shared/external stream).
+// Deletion is now explicit (`deletedAt`) so it no longer collides with the
+// administrative activation switch.
 router.delete('/:id', authenticate, authorize('Admin'), async (req: Request, res: Response) => {
   try {
     const camera = await prisma.camera.findUnique({ where: { id: req.params.id } });
-    if (!camera) {
+    if (!camera || camera.deletedAt) {
       res.status(404).json({ success: false, message: 'Camera not found' });
       return;
     }
 
-    await prisma.camera.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.camera.update({
+      where: { id: req.params.id },
+      data: { isActive: false, deletedAt: new Date() },
+    });
+    invalidateCameraStorage(camera.id);
 
     const streamName = camera.streamName;
     if (streamName && streamName.startsWith('cam_')) {
+      // A merely deactivated camera keeps its stream so it can be reactivated;
+      // only a deleted one releases it.
       const stillUsed = await prisma.camera.count({
-        where: { streamName, isActive: true },
+        where: { streamName, deletedAt: null },
       });
       if (stillUsed === 0) {
         await deleteStream(streamName);
@@ -362,6 +451,56 @@ router.delete('/:id', authenticate, authorize('Admin'), async (req: Request, res
     res.status(500).json({ success: false, message: 'Failed to delete camera' });
   }
 });
+
+// PATCH /api/cameras/:id/activation
+// Administrative on/off switch. Deliberately separate from:
+//   - DELETE (removal from the inventory)
+//   - `status` (runtime connectivity reported by heartbeats)
+// The camera stays listed, editable and keeps its modules, ROI, source and
+// history. The AI runtime stops/starts only this camera's worker on its next
+// runtime-config poll (it already reconciles `enabled` per camera).
+router.patch(
+  '/:id/activation',
+  authenticate,
+  authorize('Admin', 'Manager'),
+  async (req: Request, res: Response) => {
+    try {
+      const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
+
+      const camera = await prisma.camera.findUnique({ where: { id: req.params.id } });
+      if (!camera || camera.deletedAt) {
+        res.status(404).json({ success: false, message: 'Camera not found' });
+        return;
+      }
+
+      // Idempotent: repeating the same value is a no-op, not an error.
+      if (camera.isActive === isActive) {
+        res.json({ success: true, data: camera, meta: { changed: false } });
+        return;
+      }
+
+      const updated = await prisma.camera.update({
+        where: { id: camera.id },
+        data: { isActive },
+      });
+
+      const io = req.app.get('io') as Server | undefined;
+      io?.emit('camera-activation', {
+        id: updated.id,
+        isActive: updated.isActive,
+        updatedAt: updated.updatedAt,
+      });
+
+      res.json({ success: true, data: updated, meta: { changed: true } });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ success: false, message: err.errors[0].message });
+        return;
+      }
+      res.status(500).json({ success: false, message: 'Failed to update camera activation' });
+    }
+  },
+);
 
 // PATCH /api/cameras/:id/status
 router.patch('/:id/status', authenticate, authorize('Admin', 'Manager'), async (req: Request, res: Response) => {
@@ -382,10 +521,12 @@ router.patch('/:id/status', authenticate, authorize('Admin', 'Manager'), async (
 });
 
 // POST /api/cameras/:id/heartbeat  (called by Camera AI, protected by x-api-key)
+// Updates CONNECTIVITY only. It must never touch `isActive`: a late heartbeat
+// from a camera the admin just switched off must not re-enable it.
 router.post('/:id/heartbeat', apiKeyAuth, async (req: Request, res: Response) => {
   try {
     const camera = await prisma.camera.findUnique({ where: { id: req.params.id } });
-    if (!camera) {
+    if (!camera || camera.deletedAt) {
       res.status(404).json({ success: false, message: 'Camera not found' });
       return;
     }

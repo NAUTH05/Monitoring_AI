@@ -409,6 +409,51 @@ AI-Cam polling `GET /api/ai/runtime-config` (header `x-api-key`) và tự
 dịch vụ khi thêm một camera. `.env` của AI-Cam chỉ còn cấu hình **cấp dịch vụ**
 (model path, device, storage, URL backend...).
 
+## Dung lượng camera, bật/tắt camera và mốc thời gian
+
+### Dung lượng lưu trữ (đo thật)
+
+Cột **Dung lượng** trong trang Cameras là **số byte thật** của media thuộc camera
+đó, đo từ đĩa — không còn suy ra từ số sự kiện hay vị trí trong danh sách.
+
+- Nguồn được cộng: `<AICAM_EVENTS_DIR>/<streamName>/…` (episode của AI-Cam) và
+  `backend/evidence/{snap,rec}_<streamName>_*` (chụp/ghi tay).
+- Quy ước: `0 B` = **đã đo và không có file**; `Không đo được` = backend lỗi
+  hoặc media nằm ở MinIO (không thể liệt kê nếu chưa cấu hình S3) — hai trạng
+  thái này **không** bị gộp thành 0.
+- Kết quả cache 30 giây, tự làm mới khi có evidence mới hoặc bấm nút đo lại;
+  lần đo đầu tiên không chặn quá 1,5 giây (trả `Đang tính…`).
+- Độ phân giải chỉ hiển thị khi có cấu hình thật (wizard camera), còn lại là
+  `Không rõ` — không suy đoán.
+
+### Bật/tắt camera
+
+`PATCH /api/cameras/:id/activation` (Admin/Manager) tách **ba khái niệm**:
+
+| Khái niệm | Cột | Ý nghĩa |
+|---|---|---|
+| Kích hoạt (quản trị) | `isActive` | Admin bật/tắt camera |
+| Kết nối (runtime) | `status` | ONLINE/OFFLINE/ERROR theo heartbeat |
+| Xoá (khỏi danh mục) | `deletedAt` | Đã xoá mềm |
+
+Camera bị tắt **vẫn hiện trong danh sách**, giữ nguyên module/ROI/lịch sử, có
+thể bật lại; AI-Cam tự dừng/khởi động lại **đúng worker của camera đó** ở lần
+poll `runtime-config` kế tiếp. Heartbeat chỉ cập nhật `status`, không bao giờ
+bật lại `isActive`. Stream go2rtc chỉ bị xoá khi camera bị **xoá**, không phải
+khi bị tắt.
+
+> Migration: các camera từng bị "xoá" bằng `isActive = false` được backfill
+> `deleted_at` để không xuất hiện lại như camera đang tắt.
+
+### Múi giờ và khoảng ngày
+
+Mọi mốc ngày (`/api/events`, `/api/events/stats`, `/api/reports/*`) được tính
+theo `APP_TIME_ZONE` (mặc định `Asia/Ho_Chi_Minh`), dùng khoảng nửa mở
+`[đầu ngày, đầu ngày kế tiếp)` nên **ngày cuối của khoảng luôn được tính đủ** và
+sự kiện lúc 00:30 giờ VN thuộc đúng ngày hôm đó. Tham số ngày sai/đảo ngược trả
+`400`. Trang Events mặc định **Hôm nay**, có nút **Tất cả ngày** và khoảng tuỳ
+chọn; Reports chọn được ngày/tuần/tháng bất kỳ (kể cả tháng đã qua).
+
 ## Cảnh báo Telegram (Settings → Telegram Bots)
 
 Gửi cảnh báo giám sát tới Telegram qua **nhiều bot**, mỗi bot có **nhiều người

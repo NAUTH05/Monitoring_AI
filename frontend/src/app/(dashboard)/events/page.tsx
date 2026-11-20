@@ -4,6 +4,7 @@ import { useEventDetail } from "@/components/events/EventDetailProvider";
 import { EventSearchBar } from "@/components/events/EventSearchBar";
 import { useSocket } from "@/hooks/useSocket";
 import { api } from "@/lib/api";
+import { APP_TIME_ZONE, formatDateKey, isValidDateKey, todayKey } from "@/lib/datetime";
 import {
   cn,
   formatConfidence,
@@ -11,8 +12,14 @@ import {
   getConfidenceColor,
   getEventTypeColor,
 } from "@/lib/utils";
-import { AISearchResponse, Event, EventType, PaginatedResponse } from "@/types";
-import { Activity, AlertTriangle, CheckCircle2, Eye, Filter, RefreshCw, ShieldAlert, Zap } from "lucide-react";
+import {
+  AISearchResponse,
+  Event,
+  EventStats,
+  EventType,
+  PaginatedResponse,
+} from "@/types";
+import { Activity, AlertTriangle, CheckCircle2, Eye, Filter, RefreshCw, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -27,6 +34,26 @@ const EVENT_TYPES: EventType[] = [
   "TRAFFIC_VIOLATION",
 ];
 
+/**
+ * `today`  — the calendar day in the application timezone (default)
+ * `all`    — no date restriction, full history
+ * `custom` — explicit from/to calendar days (inclusive)
+ */
+type EventDateMode = "today" | "all" | "custom";
+
+/** Local calendar day of an event timestamp, in the app timezone. */
+function eventDayKey(timestamp: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(timestamp));
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
+}
+
 export default function EventsPage() {
   const { t } = useTranslation();
   const { openEvent } = useEventDetail();
@@ -36,47 +63,135 @@ export default function EventsPage() {
   const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState("");
   const [alertFilter, setAlertFilter] = useState("");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+
+  // Date state. Default = today, so the page opens on the current day instead
+  // of an unbounded history scan.
+  const [dateMode, setDateMode] = useState<EventDateMode>("today");
+  const [selectedDay, setSelectedDay] = useState(() => todayKey());
+  const [rangeStart, setRangeStart] = useState(() => todayKey());
+  const [rangeEnd, setRangeEnd] = useState(() => todayKey());
+
+  const [stats, setStats] = useState<EventStats | null>(null);
+  const [error, setError] = useState<string | null>(null);
   /** When set, the table shows AI-search results instead of the paginated list. */
   const [searchResult, setSearchResult] = useState<AISearchResponse | null>(null);
   const limit = 20;
 
+  const invalidRange =
+    dateMode === "custom" &&
+    isValidDateKey(rangeStart) &&
+    isValidDateKey(rangeEnd) &&
+    rangeStart > rangeEnd;
+
+  /** Query parameters shared by the list and the statistics endpoints. */
+  const dateParams = useMemo(() => {
+    if (dateMode === "all") return {} as Record<string, string>;
+    if (dateMode === "today") return { startDate: selectedDay, endDate: selectedDay };
+    return { startDate: rangeStart, endDate: rangeEnd };
+  }, [dateMode, selectedDay, rangeStart, rangeEnd]);
+
+  const filterParams = useMemo(
+    () => ({
+      ...(typeFilter && { type: typeFilter }),
+      ...(alertFilter && { isAlert: alertFilter }),
+    }),
+    [typeFilter, alertFilter],
+  );
+
   const fetchEvents = useCallback(async () => {
+    if (invalidRange) {
+      setLoading(false);
+      setEvents([]);
+      setTotal(0);
+      return;
+    }
+
     setLoading(true);
+    setError(null);
     try {
       const params = new URLSearchParams({
         page: page.toString(),
         limit: limit.toString(),
-        ...(typeFilter && { type: typeFilter }),
-        ...(alertFilter && { isAlert: alertFilter }),
-        ...(startDate && { startDate }),
-        ...(endDate && { endDate }),
+        ...dateParams,
+        ...filterParams,
       });
       const res = await api.get<PaginatedResponse<Event>>(`/events?${params}`);
       if (res.success) {
         setEvents(res.data);
         setTotal(res.meta.total);
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("events.loadFailed"));
     } finally {
       setLoading(false);
     }
-  }, [page, typeFilter, alertFilter, startDate, endDate]);
+  }, [page, dateParams, filterParams, invalidRange, t]);
+
+  /** Database aggregates for the whole selection (not just the visible page). */
+  const fetchStats = useCallback(async () => {
+    if (invalidRange) {
+      setStats(null);
+      return;
+    }
+    try {
+      const params = new URLSearchParams({ ...dateParams, ...filterParams });
+      const res = await api.get<{ success: boolean; data: EventStats }>(`/events/stats?${params}`);
+      if (res.success) setStats(res.data);
+    } catch {
+      // Stats are supplementary; the list already surfaces failures.
+      setStats(null);
+    }
+  }, [dateParams, filterParams, invalidRange]);
 
   useEffect(() => {
     fetchEvents();
   }, [fetchEvents]);
 
-  // Listen for new events via Socket.IO
-  const handleNewEvent = useCallback((event: Event) => {
-    setEvents((prev) => [event, ...prev.slice(0, limit - 1)]);
-    setTotal((t) => t + 1);
-  }, []);
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
+
+  /** Does a live event belong in the current view? */
+  const matchesCurrentView = useCallback(
+    (event: Event): boolean => {
+      if (typeFilter && event.eventType !== typeFilter) return false;
+      if (alertFilter === "true" && !event.isAlert) return false;
+      if (alertFilter === "false" && event.isAlert) return false;
+
+      if (dateMode === "all") return true;
+      const day = eventDayKey(event.timestamp);
+      if (dateMode === "today") return day === selectedDay;
+      return day >= rangeStart && day <= rangeEnd;
+    },
+    [typeFilter, alertFilter, dateMode, selectedDay, rangeStart, rangeEnd],
+  );
+
+  // Live updates must respect the active filters: a new event outside the
+  // selected day/range must not appear in a filtered view.
+  const handleNewEvent = useCallback(
+    (event: Event) => {
+      if (searchResult) return;
+      if (!matchesCurrentView(event)) {
+        // Still refresh the aggregates: "today"/"all time" may have changed.
+        fetchStats();
+        return;
+      }
+      if (page !== 1) {
+        fetchStats();
+        return;
+      }
+      setEvents((prev) => [event, ...prev.slice(0, limit - 1)]);
+      setTotal((value) => value + 1);
+      fetchStats();
+    },
+    [searchResult, matchesCurrentView, page, fetchStats],
+  );
 
   useSocket(undefined, handleNewEvent);
 
   // Deep link from a notification (Telegram "View Event Details"):
   // /events?eventId=<id> opens the event dialog once, then cleans the URL.
+  // This works for historical events regardless of the date filter.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
@@ -95,16 +210,21 @@ export default function EventsPage() {
   const visibleEvents = searchResult ? searchResult.events : events;
   const visibleTotal = searchResult ? searchResult.total : total;
 
-  const stats = useMemo(() => {
-    const alertCount = events.filter((e) => e.isAlert).length;
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const todayCount = events.filter((e) => new Date(e.timestamp).toISOString().slice(0, 10) === todayStr).length;
-    const avgConfidence = events.length > 0
-      ? (events.reduce((acc, e) => acc + (e.confidence || 0), 0) / events.length) * 100
-      : 0;
+  const rangeLabel = useMemo(() => {
+    if (dateMode === "all") return t("events.dateRangeAll");
+    if (dateMode === "today") return t("events.dateRangeToday", { date: formatDateKey(selectedDay) });
+    return t("events.dateRangeCustom", {
+      from: formatDateKey(rangeStart),
+      to: formatDateKey(rangeEnd),
+    });
+  }, [dateMode, selectedDay, rangeStart, rangeEnd, t]);
 
-    return { alertCount, todayCount, avgConfidence };
-  }, [events]);
+  const setMode = (mode: EventDateMode) => {
+    setDateMode(mode);
+    setPage(1);
+    // Re-anchor on today when returning to the default view.
+    if (mode === "today") setSelectedDay(todayKey());
+  };
 
   return (
     <div className="space-y-5">
@@ -113,10 +233,15 @@ export default function EventsPage() {
           <h1 className="text-2xl font-bold text-white">{t("events.title")}</h1>
           <p className="text-gray-400 text-sm mt-1">
             {t("events.totalEvents", { total: visibleTotal })}
+            {" · "}
+            <span className="text-gray-500">{t("events.dateRangeLabel", { range: rangeLabel })}</span>
           </p>
         </div>
         <button
-          onClick={() => fetchEvents()}
+          onClick={() => {
+            fetchEvents();
+            fetchStats();
+          }}
           className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-2.5 rounded-lg transition text-sm border border-gray-700"
         >
           <RefreshCw className="w-4 h-4" />
@@ -124,12 +249,21 @@ export default function EventsPage() {
         </button>
       </div>
 
-      {/* Event Statistics Summary Header */}
+      {error && (
+        <div className="bg-red-900/30 border border-red-800 text-red-300 rounded-lg px-3 py-2.5 text-sm">
+          {error}
+        </div>
+      )}
+
+      {/* Event Statistics Summary Header — scopes are explicit and DB-backed */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between">
           <div>
-            <p className="text-xs text-gray-400 font-medium">Tổng số sự kiện</p>
+            <p className="text-xs text-gray-400 font-medium">{t("events.statsFiltered")}</p>
             <h3 className="text-2xl font-bold text-white mt-1">{visibleTotal.toLocaleString()}</h3>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              {t("events.statsAlertRate")}: {(stats?.filtered.alertRate ?? 0).toFixed(0)}%
+            </p>
           </div>
           <div className="p-3 bg-blue-500/10 rounded-xl text-blue-400 border border-blue-500/20">
             <Activity className="w-5 h-5" />
@@ -138,8 +272,12 @@ export default function EventsPage() {
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between">
           <div>
-            <p className="text-xs text-gray-400 font-medium">Cảnh báo nguy cơ</p>
-            <h3 className="text-2xl font-bold text-red-400 mt-1">{stats.alertCount.toLocaleString()}</h3>
+            <p className="text-xs text-gray-400 font-medium">
+              {t("events.statsFiltered")} · {t("events.alertsOnly")}
+            </p>
+            <h3 className="text-2xl font-bold text-red-400 mt-1">
+              {(stats?.filtered.totalAlerts ?? 0).toLocaleString()}
+            </h3>
           </div>
           <div className="p-3 bg-red-500/10 rounded-xl text-red-400 border border-red-500/20">
             <AlertTriangle className="w-5 h-5" />
@@ -148,8 +286,13 @@ export default function EventsPage() {
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between">
           <div>
-            <p className="text-xs text-gray-400 font-medium">Sự kiện hôm nay</p>
-            <h3 className="text-2xl font-bold text-emerald-400 mt-1">{stats.todayCount.toLocaleString()}</h3>
+            <p className="text-xs text-gray-400 font-medium">{t("events.statsToday")}</p>
+            <h3 className="text-2xl font-bold text-emerald-400 mt-1">
+              {(stats?.todayScope.totalEvents ?? 0).toLocaleString()}
+            </h3>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              {t("events.statsAllTime")}: {(stats?.allTime.totalEvents ?? 0).toLocaleString()}
+            </p>
           </div>
           <div className="p-3 bg-emerald-500/10 rounded-xl text-emerald-400 border border-emerald-500/20">
             <CheckCircle2 className="w-5 h-5" />
@@ -158,8 +301,11 @@ export default function EventsPage() {
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between">
           <div>
-            <p className="text-xs text-gray-400 font-medium">Độ tin cậy AI trung bình</p>
-            <h3 className="text-2xl font-bold text-amber-400 mt-1">{stats.avgConfidence.toFixed(1)}%</h3>
+            <p className="text-xs text-gray-400 font-medium">{t("events.statsAvgConfidence")}</p>
+            <h3 className="text-2xl font-bold text-amber-400 mt-1">
+              {((stats?.filtered.avgConfidence ?? 0) * 100).toFixed(1)}%
+            </h3>
+            <p className="text-[11px] text-gray-500 mt-0.5">{t("events.statsScopeHint")}</p>
           </div>
           <div className="p-3 bg-amber-500/10 rounded-xl text-amber-400 border border-amber-500/20">
             <Zap className="w-5 h-5" />
@@ -176,6 +322,65 @@ export default function EventsPage() {
           <Filter className="w-4 h-4" />
           <span>{t("events.filters")}</span>
         </div>
+
+        {/* Date mode: today / all / custom */}
+        <div className="flex bg-gray-950 border border-gray-800 rounded-lg p-0.5">
+          {(["today", "all", "custom"] as EventDateMode[]).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setMode(mode)}
+              className={cn(
+                "px-3 py-1.5 rounded-md text-xs font-medium transition",
+                dateMode === mode ? "bg-blue-600 text-white" : "text-gray-400 hover:text-white",
+              )}
+            >
+              {mode === "today"
+                ? t("events.dateToday")
+                : mode === "all"
+                  ? t("events.dateAll")
+                  : t("events.dateCustom")}
+            </button>
+          ))}
+        </div>
+
+        {dateMode === "today" && (
+          <input
+            type="date"
+            value={selectedDay}
+            onChange={(e) => {
+              setSelectedDay(e.target.value || todayKey());
+              setPage(1);
+            }}
+            aria-label={t("events.dateToday")}
+            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+          />
+        )}
+
+        {dateMode === "custom" && (
+          <>
+            <input
+              type="date"
+              value={rangeStart}
+              onChange={(e) => {
+                setRangeStart(e.target.value);
+                setPage(1);
+              }}
+              aria-label={t("events.dateFrom")}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+            />
+            <input
+              type="date"
+              value={rangeEnd}
+              onChange={(e) => {
+                setRangeEnd(e.target.value);
+                setPage(1);
+              }}
+              aria-label={t("events.dateTo")}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+            />
+          </>
+        )}
+
         <select
           value={typeFilter}
           onChange={(e) => {
@@ -203,31 +408,13 @@ export default function EventsPage() {
           <option value="true">{t("events.alertsOnly")}</option>
           <option value="false">{t("events.nonAlertOnly")}</option>
         </select>
-        <input
-          type="date"
-          value={startDate}
-          onChange={(e) => {
-            setStartDate(e.target.value);
-            setPage(1);
-          }}
-          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
-        />
-        <input
-          type="date"
-          value={endDate}
-          onChange={(e) => {
-            setEndDate(e.target.value);
-            setPage(1);
-          }}
-          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
-        />
-        {(typeFilter || alertFilter || startDate || endDate) && (
+
+        {(typeFilter || alertFilter || dateMode !== "today") && (
           <button
             onClick={() => {
               setTypeFilter("");
               setAlertFilter("");
-              setStartDate("");
-              setEndDate("");
+              setMode("today");
               setPage(1);
             }}
             className="text-sm text-gray-400 hover:text-white transition underline"
@@ -235,6 +422,11 @@ export default function EventsPage() {
             {t("events.clearFilters")}
           </button>
         )}
+
+        {invalidRange && <p className="w-full text-xs text-red-400">{t("events.invalidRange")}</p>}
+        <p className="w-full text-[11px] text-gray-600">
+          {t("events.timeZoneHint", { zone: APP_TIME_ZONE })}
+        </p>
       </div>
 
       {/* Table */}
