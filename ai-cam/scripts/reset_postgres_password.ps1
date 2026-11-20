@@ -20,7 +20,8 @@
 
 .EXAMPLE
   # Elevated PowerShell
-  powershell -ExecutionPolicy Bypass -File C:\Work\PROJECTS\monitoringAI\ai-cam\scripts\reset_postgres_password.ps1
+  # Run from the repository root
+  powershell -ExecutionPolicy Bypass -File .\ai-cam\scripts\reset_postgres_password.ps1
 
 .EXAMPLE
   # Use a custom new password and only reset (do not create aicam):

@@ -80,7 +80,7 @@ Switching from webcam to an IP camera is a configuration change only.
 The repository already contains `ai-cam/.venv`. If you recreate it:
 
 ```powershell
-cd C:\Work\PROJECTS\monitoringAI\ai-cam
+cd .\ai-cam
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 # CUDA PyTorch for the RTX 3050 (CUDA 12.8 build):
@@ -364,7 +364,7 @@ Use real footage from your own CCTV/NVR, or record clips with the laptop webcam
 ### 2. Extract frames
 
 ```powershell
-cd C:\Work\PROJECTS\monitoringAI\ai-cam
+cd .\ai-cam
 .\.venv\Scripts\python.exe scripts\prepare_intrusion_dataset.py extract `
     --source "D:\cctv_footage" --fps 1
 ```

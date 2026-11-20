@@ -6,7 +6,7 @@ source video** so near-identical consecutive frames cannot leak across splits.
 
 Typical Windows PowerShell flow::
 
-    cd C:\\Work\\PROJECTS\\monitoringAI\\ai-cam
+    cd .\\ai-cam  # run from the repository root
 
     # 1. Extract frames (one group per source video) into the raw pool
     .\\.venv\\Scripts\\python.exe scripts\\prepare_intrusion_dataset.py extract `

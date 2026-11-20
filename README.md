@@ -33,8 +33,8 @@ Hệ thống giám sát camera AI - dark mode dashboard với realtime alerts.
 **Bước 1 — Tải source về**
 
 ```bash
-git clone https://github.com/NAUTH05/MonitoringAI.git
-cd MonitoringAI
+git clone https://github.com/NAUTH05/Monitoring_AI.git
+cd Monitoring_AI
 ```
 
 **Bước 2 — Tạo file cấu hình từ mẫu**
@@ -225,7 +225,7 @@ $env:Path += ";C:\Program Files\PostgreSQL\16\bin"
 ### 3. Tạo file cấu hình từ mẫu
 
 ```powershell
-cd C:\Work\PROJECTS\monitoringAI
+# Chạy các lệnh sau từ thư mục gốc của repository.
 Copy-Item backend\.env.example backend\.env
 Copy-Item ai-cam\.env.example  ai-cam\.env
 ```

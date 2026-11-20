@@ -147,9 +147,9 @@ sudo journalctl -u go2rtc -f       # log go2rtc
 
 ---
 
-## Cập nhật code từ nhánh `dev` lên server
+## Cập nhật code từ nhánh `main` lên server
 
-Áp dụng khi đã deploy lần đầu (các bước 1-8 xong) và chỉ cần kéo thay đổi mới từ nhánh `dev`. Chạy dưới user sở hữu `/opt/monitoringAI`.
+Áp dụng khi đã deploy lần đầu (các bước 1-8 xong) và chỉ cần kéo thay đổi mới từ nhánh `main`. Chạy dưới user sở hữu `/opt/monitoringAI`.
 
 ### 1. Kéo code mới
 
@@ -157,8 +157,8 @@ sudo journalctl -u go2rtc -f       # log go2rtc
 cd /opt/monitoringAI
 pm2 save                              # snapshot trạng thái process hiện tại (để rollback)
 git fetch origin
-git checkout dev                      # lần đầu; các lần sau bỏ qua nếu đã ở dev
-git pull --ff-only origin dev
+git checkout main                     # lần đầu; các lần sau bỏ qua nếu đã ở main
+git pull --ff-only origin main
 ```
 
 Nếu `git pull` báo local có thay đổi lạ (vd `go2rtc.yaml` bị UI ghi đè): `git stash` trước khi pull, xử lý sau. KHÔNG `git reset --hard` nếu chưa chắc — sẽ mất cấu hình stream.
